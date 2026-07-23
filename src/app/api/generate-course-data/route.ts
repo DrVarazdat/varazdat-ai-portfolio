@@ -1,29 +1,53 @@
 import { NextResponse } from 'next/server';
 
+// 🔴 THE FIX: Vercel's server environment is missing 'DOMMatrix'. 
+// We create a "dummy" DOMMatrix object here to stop pdf-parse from crashing!
+if (typeof globalThis !== 'undefined' && !(globalThis as any).DOMMatrix) {
+  (globalThis as any).DOMMatrix = class DOMMatrix { constructor() {} };
+}
+
 export async function POST(request: Request) {
   try {
-    // 1. We just receive raw text from the frontend now! No PDF parsing on the server.
-    const { text } = await request.json();
+    // 🔴 THE FIX 2: We use 'require' instead of 'import' to bypass Vercel build errors!
+    const pdfParse = require('pdf-parse');
 
-    if (!text || text.trim() === '') {
+    // 1. Read the incoming file
+    const formData = await request.formData();
+    const file = formData.get('file') as File | null;
+    let extractedText = "";
+
+    // 2. Extract text from the PDF safely on the server
+    if (file) {
+      if (file.type === 'application/pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const pdfData = await pdfParse(buffer);
+        extractedText = pdfData.text;
+      } else if (file.type === 'text/plain') {
+        extractedText = await file.text();
+      } else {
+        return NextResponse.json({ error: 'Please upload a PDF or TXT file.' }, { status: 400 });
+      }
+    }
+
+    if (!extractedText || extractedText.trim() === '') {
       return NextResponse.json({ error: 'No readable text found.' }, { status: 400 });
     }
 
-    // 2. Send the text to OpenAI
+    // 3. Send text to OpenAI
     const prompt = `
-      You are an expert CMS assistant for Dr. Varazdat Avetisyan's AI website. 
-      Read the following raw text from a syllabus or document, and extract the course details.
+      You are an expert CMS assistant. Read this syllabus text and extract course details.
       
-      You MUST return ONLY a valid JSON object with the following exact keys:
-      - "title": (string) The name of the course.
-      - "category": (string) Must be exactly "Beginner", "Intermediate", or "Advanced".
-      - "format": (string) Must be exactly "Online", "In-person", or "Hybrid". 
-      - "status": (string) Must be exactly "Active", "Upcoming", or "Past". 
-      - "description": (string) A concise 2-3 sentence engaging summary of the course.
-      - "nextDate": (string) A short date string like "Starts Nov 15, 2024" or "Available Now".
+      Return ONLY a JSON object with these exact keys:
+      - "title": (string) Course name.
+      - "category": (string) "Beginner", "Intermediate", or "Advanced".
+      - "format": (string) "Online", "In-person", or "Hybrid". 
+      - "status": (string) "Active", "Upcoming", or "Past". 
+      - "description": (string) A concise 2-3 sentence engaging summary.
+      - "nextDate": (string) Example: "Starts Nov 15, 2024" or "Available Now".
       
-      Raw Text:
-      "${text}"
+      Text to analyze:
+      "${extractedText}"
     `;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -42,10 +66,11 @@ export async function POST(request: Request) {
     const data = await response.json();
     if (data.error) throw new Error(data.error.message);
 
-    return NextResponse.json(JSON.parse(data.choices[0].message.content));
+    const resultJson = JSON.parse(data.choices[0].message.content);
+    return NextResponse.json(resultJson);
 
   } catch (error: any) {
-    console.error("OpenAI Error:", error);
+    console.error("API Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
