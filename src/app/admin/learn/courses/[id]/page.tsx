@@ -17,8 +17,6 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState("general");
   const [isUploading, setIsUploading] = useState(false);
-  
-  // AI Loading State
   const [aiLoading, setAiLoading] = useState(false);
 
   useEffect(() => {
@@ -50,7 +48,6 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
 
   const updateField = (field: string, value: any) => setCourse({ ...course, [field]: value });
 
-  // --- IMAGE UPLOAD LOGIC ---
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, field: string) => {
     try {
       const file = e.target.files?.[0];
@@ -73,37 +70,58 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
     }
   };
 
- // --- AI PDF PARSER LOGIC ---
- const handleAIGenerate = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // --- THE FIX: BROWSER-SIDE PDF PARSING ---
+  const handleAIGenerate = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     
     setAiLoading(true);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      
-      const res = await fetch('/api/generate-course-data', {
-        method: 'POST',
-        body: formData,
-      });
-      
-      // FIX: Check if the response is actually OK before trying to parse JSON!
-      const rawText = await res.text();
-      
-      let data;
-      try {
-        data = JSON.parse(rawText);
-      } catch (parseError) {
-        // If it fails to parse JSON, it means the server returned an HTML crash page
-        console.error("Server returned HTML instead of JSON:", rawText);
-        throw new Error("The API route is missing or crashed. Please check the terminal for errors.");
+      let extractedText = "";
+
+      // 1. Read the PDF directly inside the browser
+      if (file.type === 'application/pdf') {
+        // Dynamically import pdfjs to prevent SSR build errors
+        const pdfjsLib = await import('pdfjs-dist');
+        // Point to the secure CDN worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        
+        // Loop through all pages and extract the text
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          extractedText += textContent.items.map((item: any) => item.str).join(" ") + " ";
+        }
+      } else if (file.type === 'text/plain') {
+        extractedText = await file.text();
+      } else {
+        throw new Error("Invalid file type. Please upload a PDF or TXT.");
       }
 
+      // 2. Send ONLY the extracted text to our API
+      const res = await fetch('/api/generate-course-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: extractedText }),
+      });
+      
+      const data = await res.json();
       if (data.error) throw new Error(data.error);
 
-      // Merge AI data into course data
-      setCourse({ ...course, ...data });
+      // 3. Auto-fill the course editor fields
+      setCourse({ 
+        ...course, 
+        title: data.title || course.title,
+        category: data.category || course.category,
+        format: data.format || course.format,
+        status: data.status || course.status,
+        short_description: data.description || course.short_description,
+        start_date: data.nextDate || course.start_date
+      });
+
       alert("✅ AI successfully extracted the course details!");
     } catch (err: any) {
       alert("AI Parsing failed: " + err.message);
@@ -112,15 +130,12 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
     }
   };
 
-  // Array Handlers for Curriculum
   const addModule = () => updateField('curriculum', [...course.curriculum, { title: "New Module", lessons: ["New Lesson"] }]);
   const updateModuleTitle = (idx: number, title: string) => { const c = [...course.curriculum]; c[idx].title = title; updateField('curriculum', c); };
   const addLesson = (idx: number) => { const c = [...course.curriculum]; c[idx].lessons.push("New Lesson"); updateField('curriculum', c); };
   const updateLesson = (mIdx: number, lIdx: number, val: string) => { const c = [...course.curriculum]; c[mIdx].lessons[lIdx] = val; updateField('curriculum', c); };
   const removeModule = (idx: number) => { const c = [...course.curriculum]; c.splice(idx, 1); updateField('curriculum', c); };
   const removeLesson = (mIdx: number, lIdx: number) => { const c = [...course.curriculum]; c[mIdx].lessons.splice(lIdx, 1); updateField('curriculum', c); };
-
-  // Array Handlers for Lists
   const addListItem = (field: string) => updateField(field, [...course[field], "New Item"]);
   const updateListItem = (field: string, idx: number, val: string) => { const list = [...course[field]]; list[idx] = val; updateField(field, list); };
   const removeListItem = (field: string, idx: number) => { const list = [...course[field]]; list.splice(idx, 1); updateField(field, list); };
@@ -140,24 +155,22 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
         <div className="flex gap-4">
           <a href={`/learn/courses/${course.slug}`} target="_blank" className="bg-gray-100 text-deepBlue px-6 py-3 rounded-xl font-bold hover:bg-gray-200 transition-colors">Preview</a>
           <button onClick={handleSave} disabled={saving || isUploading} className="bg-deepBlue text-white px-8 py-3 rounded-xl font-bold hover:bg-aiPurple transition-colors shadow-lg">
-            {saving ? "Saving..." : isUploading ? "Uploading Image..." : "💾 Save Changes"}
+            {saving ? "Saving..." : isUploading ? "Uploading..." : "💾 Save Changes"}
           </button>
         </div>
       </div>
 
-      {/* --- RESTORED AI AUTO-FILL WIDGET --- */}
       <div className="bg-gradient-to-r from-aiPurple to-cyan p-8 rounded-3xl text-white shadow-xl flex flex-col md:flex-row items-center justify-between gap-6">
         <div>
           <h2 className="text-2xl font-extrabold mb-2 flex items-center gap-2"><span>✨</span> AI Auto-Fill from Syllabus</h2>
           <p className="text-white/90 text-sm max-w-xl">Upload a PDF or TXT file of your course syllabus. The AI will instantly read it and auto-fill the Title, Description, Format, Level, and Start Date below.</p>
         </div>
         <label className="cursor-pointer bg-white text-deepBlue font-bold px-8 py-4 rounded-xl hover:bg-gray-100 transition-colors shadow-md flex-shrink-0 uppercase tracking-wide">
-          {aiLoading ? "🤖 AI is reading PDF..." : "Upload PDF / TXT"}
+          {aiLoading ? "🤖 AI IS READING PDF..." : "UPLOAD PDF / TXT"}
           <input type="file" accept=".pdf,.txt" onChange={handleAIGenerate} disabled={aiLoading} className="hidden" />
         </label>
       </div>
 
-      {/* TABS */}
       <div className="flex gap-2">
         {['general', 'curriculum', 'requirements'].map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} className={`px-6 py-3 rounded-t-xl font-bold capitalize transition-colors ${activeTab === tab ? 'bg-deepBlue text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
@@ -168,7 +181,6 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
 
       <div className="bg-white p-8 rounded-b-3xl rounded-tr-3xl shadow-sm border border-gray-200 -mt-8">
         
-        {/* TAB 1: GENERAL & IMAGES */}
         {activeTab === 'general' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div className="space-y-4">
@@ -204,7 +216,6 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
           </div>
         )}
 
-        {/* TAB 2: CURRICULUM */}
         {activeTab === 'curriculum' && (
           <div className="space-y-6">
             <h2 className="text-2xl font-bold text-deepBlue border-b pb-4">Modules & Lessons</h2>
@@ -228,7 +239,6 @@ export default function CourseEditor({ params }: { params: Promise<{ id: string 
           </div>
         )}
 
-        {/* TAB 3: PREREQUISITES & OUTCOMES */}
         {activeTab === 'requirements' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div className="bg-gray-50 p-6 rounded-2xl border border-gray-200">
